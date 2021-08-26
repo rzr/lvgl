@@ -146,6 +146,10 @@ void _lv_indev_read(lv_indev_t * indev, lv_indev_data_t * data)
     else if(indev->driver->type == LV_INDEV_TYPE_ENCODER) {
         data->key = LV_KEY_ENTER;
     }
+    else if(indev->driver->type == LV_INDEV_TYPE_SCROLL) {
+        data->point.x = indev->proc.types.pointer.last_raw_point.x;
+        data->point.y = indev->proc.types.pointer.last_raw_point.y;
+    }
 
     if(indev->driver->read_cb) {
         INDEV_TRACE("calling indev_read_cb");

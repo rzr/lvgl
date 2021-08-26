@@ -35,8 +35,10 @@ static void indev_pointer_proc(lv_indev_t * i, lv_indev_data_t * data);
 static void indev_keypad_proc(lv_indev_t * i, lv_indev_data_t * data);
 static void indev_encoder_proc(lv_indev_t * i, lv_indev_data_t * data);
 static void indev_button_proc(lv_indev_t * i, lv_indev_data_t * data);
+static void indev_scroll_proc(lv_indev_t * i, lv_indev_data_t * data);
 static void indev_proc_press(_lv_indev_proc_t * proc);
 static void indev_proc_release(_lv_indev_proc_t * proc);
+static void indev_proc_drag(_lv_indev_proc_t * proc);
 static void indev_proc_reset_query_handler(lv_indev_t * indev);
 static void indev_click_focus(_lv_indev_proc_t * proc);
 static void indev_gesture(_lv_indev_proc_t * proc);
@@ -95,6 +97,9 @@ void lv_indev_read_timer_cb(lv_timer_t * timer)
         else if(indev_act->driver->type == LV_INDEV_TYPE_ENCODER && data.enc_diff) {
             indev_act->driver->disp->last_activity_time = lv_tick_get();
         }
+        else if(indev_act->driver->type == LV_INDEV_TYPE_SCROLL && (data.point.x > 0 || data.point.y > 0)) {
+            indev_act->driver->disp->last_activity_time = lv_tick_get();
+        }
 
         if(indev_act->driver->type == LV_INDEV_TYPE_POINTER) {
             indev_pointer_proc(indev_act, &data);
@@ -107,6 +112,9 @@ void lv_indev_read_timer_cb(lv_timer_t * timer)
         }
         else if(indev_act->driver->type == LV_INDEV_TYPE_BUTTON) {
             indev_button_proc(indev_act, &data);
+        }
+        else if(indev_act->driver->type == LV_INDEV_TYPE_SCROLL) {
+            indev_scroll_proc(indev_act, &data);
         }
         /*Handle reset query if it happened in during processing*/
         indev_proc_reset_query_handler(indev_act);
@@ -766,6 +774,28 @@ static void indev_button_proc(lv_indev_t * i, lv_indev_data_t * data)
     i->proc.types.pointer.last_point.y = i->proc.types.pointer.act_point.y;
 }
 
+static void indev_scroll_proc(lv_indev_t * i, lv_indev_data_t * data)
+{
+    if (data->point.x < 0 && data->point.y < 0) {
+        return;
+    }
+
+    i->proc.types.pointer.act_point.x = data->point.x;
+    i->proc.types.pointer.act_point.y = data->point.y;
+    i->proc.types.pointer.vect.x = data->scroll.x;
+    i->proc.types.pointer.vect.y = data->scroll.y;
+
+    if(i->proc.state == LV_INDEV_STATE_PRESSED) {
+        indev_proc_drag(&i->proc);
+    }
+    else {
+        indev_proc_release(&i->proc);
+    }
+
+    i->proc.types.pointer.last_point.x = i->proc.types.pointer.act_point.x;
+    i->proc.types.pointer.last_point.y = i->proc.types.pointer.act_point.y;
+}
+
 /**
  * Process the pressed state of LV_INDEV_TYPE_POINTER input devices
  * @param indev pointer to an input device 'proc'
@@ -947,7 +977,101 @@ static void indev_proc_release(_lv_indev_proc_t * proc)
     /*The reset can be set in the Call the ancestor's event handler function.
      * In case of reset query ignore the remaining parts.*/
     if(scroll_obj) {
+        lv_area_t coords;
+        lv_obj_get_coords(scroll_obj, &coords);
+        LV_LOG_INFO("_lv_indev_scroll_throw_handler[%d*%d]@[%d,%d] scroll_throw_vect.x=%d\n",
+                lv_area_get_width(&coords), lv_area_get_height(&coords), coords.x1, coords.y1,
+                proc->types.pointer.scroll_throw_vect.x);
         _lv_indev_scroll_throw_handler(proc);
+        if(indev_reset_check(proc)) return;
+    }
+}
+
+/**
+ * Process the drag state of LV_INDEV_TYPE_SCROLL input devices
+ * @param proc pointer to an input device 'proc'
+ */
+static void indev_proc_drag(_lv_indev_proc_t * proc)
+{
+    LV_LOG_INFO("dragging offset x:%d y:%d\n", proc->types.pointer.vect.x, proc->types.pointer.vect.y);
+    indev_obj_act = proc->types.pointer.act_obj;
+
+    if(proc->wait_until_release != 0) return;
+
+    lv_disp_t * disp = indev_act->driver->disp;
+    bool new_obj_searched = false;
+
+    /*If there is no last object then search*/
+    if(indev_obj_act == NULL) {
+        indev_obj_act = lv_indev_search_obj(lv_disp_get_layer_sys(disp), &proc->types.pointer.act_point);
+        if(indev_obj_act == NULL) indev_obj_act = lv_indev_search_obj(lv_disp_get_layer_top(disp),
+                                                                      &proc->types.pointer.act_point);
+        if(indev_obj_act == NULL) indev_obj_act = lv_indev_search_obj(lv_disp_get_scr_act(disp),
+                                                                      &proc->types.pointer.act_point);
+        new_obj_searched = true;
+    }
+    /*If there is last object but it is not scrolled and not protected also search*/
+    else if(proc->types.pointer.scroll_obj == NULL &&
+    lv_obj_has_flag(indev_obj_act, LV_OBJ_FLAG_PRESS_LOCK) == false) {
+        indev_obj_act = lv_indev_search_obj(lv_disp_get_layer_sys(disp), &proc->types.pointer.act_point);
+        if(indev_obj_act == NULL) indev_obj_act = lv_indev_search_obj(lv_disp_get_layer_top(disp),
+                                                                      &proc->types.pointer.act_point);
+        if(indev_obj_act == NULL) indev_obj_act = lv_indev_search_obj(lv_disp_get_scr_act(disp),
+                                                                      &proc->types.pointer.act_point);
+        new_obj_searched = true;
+    }
+
+    /*Find first scrollable parent */
+    if (new_obj_searched && indev_obj_act) {
+        lv_obj_t *scrollable_obj = indev_obj_act;
+        while (scrollable_obj && !lv_obj_has_flag(scrollable_obj, LV_OBJ_FLAG_SCROLLABLE)) {
+            scrollable_obj = lv_obj_get_parent(scrollable_obj);
+        }
+        indev_obj_act = scrollable_obj;
+    }
+
+    /*The last object might have scroll throw. Stop it manually*/
+    if(new_obj_searched && proc->types.pointer.last_obj) {
+        proc->types.pointer.scroll_throw_vect.x = 0;
+        proc->types.pointer.scroll_throw_vect.y = 0;
+        _lv_indev_scroll_throw_handler(proc);
+        if(indev_reset_check(proc)) return;
+    }
+
+    /*If a new object was found reset some variables and send a pressed Call the ancestor's event handler*/
+    if(indev_obj_act != proc->types.pointer.act_obj) {
+        proc->types.pointer.last_point.x = proc->types.pointer.act_point.x;
+        proc->types.pointer.last_point.y = proc->types.pointer.act_point.y;
+
+        /*If a new object found the previous was lost, so send a Call the ancestor's event handler*/
+        if(proc->types.pointer.act_obj != NULL) {
+            /*Save the obj because in special cases `act_obj` can change in the Call the ancestor's event handler function*/
+            lv_obj_t * last_obj = proc->types.pointer.act_obj;
+
+            lv_event_send(last_obj, LV_EVENT_PRESS_LOST, indev_act);
+            if(indev_reset_check(proc)) return;
+        }
+
+        proc->types.pointer.act_obj  = indev_obj_act; /*Save the scrolled object*/
+        proc->types.pointer.last_obj = indev_obj_act;
+    }
+
+    /*Calculate the vector and apply a low pass filter: new value = 0.5 * old_value + 0.5 * new_value*/
+
+    proc->types.pointer.scroll_throw_vect.x = (proc->types.pointer.scroll_throw_vect.x * 4) >> 3;
+    proc->types.pointer.scroll_throw_vect.y = (proc->types.pointer.scroll_throw_vect.y * 4) >> 3;
+
+    proc->types.pointer.scroll_throw_vect.x += (proc->types.pointer.vect.x * 4) >> 3;
+    proc->types.pointer.scroll_throw_vect.y += (proc->types.pointer.vect.y * 4) >> 3;
+
+    proc->types.pointer.scroll_throw_vect_ori = proc->types.pointer.scroll_throw_vect;
+
+    if(indev_obj_act) {
+        if(indev_act->proc.wait_until_release) return;
+
+        _lv_indev_scroll_handler(proc);
+        if(indev_reset_check(proc)) return;
+        indev_gesture(proc);
         if(indev_reset_check(proc)) return;
     }
 }
